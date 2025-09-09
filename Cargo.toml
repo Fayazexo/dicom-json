@@ -1,8 +1,8 @@
 [package]
 name = "dicom-json"
-version = "1.0.0"
+version = "1.0.2"
 edition = "2024"
-authors = ["Fayaz <fayazexo@example.com>"]
+authors = ["Fayaze <fayazexo@example.com>"]
 description = "Convert DICOM medical files to JSON format"
 repository = "https://github.com/fayazexo/dicom-json"
 license = "MIT OR Apache-2.0"
