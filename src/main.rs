@@ -275,10 +275,15 @@ impl DicomProcessor {
         let vr = element.vr().to_string();
         let tag_string = format!("({:04X},{:04X})", tag.group(), tag.element());
         
-        // Get human-readable name from dictionary
-        let name = dicom_dictionary_std::StandardDataDictionary
-            .by_tag(tag)
-            .map(|entry| entry.alias.to_string());
+        // Get human-readable name from dictionary based on format
+        let name = match self.cli.format {
+            OutputFormat::Basic | OutputFormat::Raw => None, // No names for basic/raw
+            OutputFormat::Comprehensive | OutputFormat::Medical => {
+                dicom_dictionary_std::StandardDataDictionary
+                    .by_tag(tag)
+                    .map(|entry| entry.alias.to_string())
+            }
+        };
 
         let is_private = tag.group() % 2 == 1;
         
@@ -625,10 +630,17 @@ fn organize_by_hierarchy(
         let study_dir = output_dir.join(format!("study_{}", sanitize_filename(&study_uid)));
         fs::create_dir_all(&study_dir)?;
 
+        let study_output = match processor.cli.format {
+            OutputFormat::Basic => create_basic_study_output(&study),
+            OutputFormat::Medical => create_medical_study_output(&study),
+            OutputFormat::Raw => create_raw_study_output(&study),
+            OutputFormat::Comprehensive => serde_json::to_value(&study)?,
+        };
+
         let json_content = if processor.cli.pretty {
-            serde_json::to_string_pretty(&study)?
+            serde_json::to_string_pretty(&study_output)?
         } else {
-            serde_json::to_string(&study)?
+            serde_json::to_string(&study_output)?
         };
 
         let json_file = study_dir.join("study.json");
@@ -647,6 +659,50 @@ fn save_results(
     output_dir: &Path, 
     processor: &DicomProcessor
 ) -> Result<()> {
+    let output_data = match processor.cli.format {
+        OutputFormat::Basic => create_basic_output(results),
+        OutputFormat::Comprehensive => create_comprehensive_output(results),
+        OutputFormat::Medical => create_medical_output(results),
+        OutputFormat::Raw => create_raw_output(results),
+    };
+
+    let json_content = if processor.cli.pretty {
+        serde_json::to_string_pretty(&output_data)?
+    } else {
+        serde_json::to_string(&output_data)?
+    };
+
+    let output_file = output_dir.join("dicom_data.json");
+    fs::write(&output_file, json_content)?;
+
+    if processor.cli.verbose {
+        println!("📄 Results saved to: {:?}", output_file);
+    }
+
+    Ok(())
+}
+
+fn create_basic_output(results: &[DicomInstance]) -> serde_json::Value {
+    let basic_instances: Vec<_> = results.iter().map(|instance| {
+        serde_json::json!({
+            "file_path": instance.file_path,
+            "sop_instance_uid": instance.sop_instance_uid,
+            "tags": instance.metadata.tags.iter()
+                .filter(|(_, tag_info)| !tag_info.is_private)
+                .take(10) // Limit to first 10 tags for basic format
+                .map(|(k, v)| (k.clone(), v.value.clone()))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+        })
+    }).collect();
+
+    serde_json::json!({
+        "format": "basic",
+        "total_files": results.len(),
+        "instances": basic_instances
+    })
+}
+
+fn create_comprehensive_output(results: &[DicomInstance]) -> serde_json::Value {
     let processing_info = ProcessingInfo {
         processing_id: Uuid::new_v4().to_string(),
         timestamp: Utc::now(),
@@ -665,25 +721,147 @@ fn save_results(
         },
     };
 
-    let output_data = serde_json::json!({
+    serde_json::json!({
+        "format": "comprehensive",
         "processing_info": processing_info,
         "instances": results
-    });
+    })
+}
 
-    let json_content = if processor.cli.pretty {
-        serde_json::to_string_pretty(&output_data)?
-    } else {
-        serde_json::to_string(&output_data)?
-    };
+fn create_medical_output(results: &[DicomInstance]) -> serde_json::Value {
+    let medical_instances: Vec<_> = results.iter().map(|instance| {
+        serde_json::json!({
+            "file_path": instance.file_path,
+            "patient": {
+                "id": get_tag_value(&instance.metadata.tags, tags::PATIENT_ID),
+                "name": get_tag_value(&instance.metadata.tags, tags::PATIENT_NAME),
+                "birth_date": get_tag_value(&instance.metadata.tags, tags::PATIENT_BIRTH_DATE),
+                "sex": get_tag_value(&instance.metadata.tags, tags::PATIENT_SEX),
+                "age": get_tag_value(&instance.metadata.tags, tags::PATIENT_AGE),
+            },
+            "study": {
+                "uid": get_tag_value(&instance.metadata.tags, tags::STUDY_INSTANCE_UID),
+                "date": get_tag_value(&instance.metadata.tags, tags::STUDY_DATE),
+                "time": get_tag_value(&instance.metadata.tags, tags::STUDY_TIME),
+                "description": get_tag_value(&instance.metadata.tags, tags::STUDY_DESCRIPTION),
+            },
+            "series": {
+                "uid": get_tag_value(&instance.metadata.tags, tags::SERIES_INSTANCE_UID),
+                "number": get_tag_value(&instance.metadata.tags, tags::SERIES_NUMBER),
+                "description": get_tag_value(&instance.metadata.tags, tags::SERIES_DESCRIPTION),
+                "modality": get_tag_value(&instance.metadata.tags, tags::MODALITY),
+            },
+            "instance": {
+                "uid": instance.sop_instance_uid.clone(),
+                "number": instance.instance_number.clone(),
+                "has_pixel_data": instance.has_pixel_data,
+            },
+            "imaging": {
+                "rows": get_tag_value(&instance.metadata.tags, tags::ROWS),
+                "columns": get_tag_value(&instance.metadata.tags, tags::COLUMNS),
+                "bits_allocated": get_tag_value(&instance.metadata.tags, tags::BITS_ALLOCATED),
+                "photometric_interpretation": get_tag_value(&instance.metadata.tags, tags::PHOTOMETRIC_INTERPRETATION),
+                "transfer_syntax": instance.metadata.transfer_syntax.clone(),
+            }
+        })
+    }).collect();
 
-    let output_file = output_dir.join("dicom_data.json");
-    fs::write(&output_file, json_content)?;
+    serde_json::json!({
+        "format": "medical",
+        "summary": {
+            "total_instances": results.len(),
+            "files_with_images": results.iter().filter(|r| r.has_pixel_data).count(),
+            "unique_modalities": results.iter()
+                .filter_map(|r| get_tag_value(&r.metadata.tags, tags::MODALITY))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>(),
+        },
+        "instances": medical_instances
+    })
+}
 
-    if processor.cli.verbose {
-        println!("📄 Results saved to: {:?}", output_file);
-    }
+fn create_raw_output(results: &[DicomInstance]) -> serde_json::Value {
+    let raw_instances: Vec<_> = results.iter().map(|instance| {
+        serde_json::json!({
+            "file": instance.file_path,
+            "tags": instance.metadata.tags.iter()
+                .map(|(k, v)| (k.clone(), serde_json::json!({
+                    "vr": v.vr,
+                    "raw": v.raw_value,
+                    "private": v.is_private
+                })))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+        })
+    }).collect();
 
-    Ok(())
+    serde_json::json!({
+        "format": "raw",
+        "instances": raw_instances
+    })
+}
+
+fn create_basic_study_output(study: &DicomStudy) -> serde_json::Value {
+    serde_json::json!({
+        "format": "basic",
+        "study_uid": study.study_instance_uid,
+        "study_date": study.study_date,
+        "series_count": study.series.len(),
+        "total_instances": study.series.values().map(|s| s.instances.len()).sum::<usize>(),
+        "modalities": study.series.values()
+            .filter_map(|s| s.modality.as_ref())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    })
+}
+
+fn create_medical_study_output(study: &DicomStudy) -> serde_json::Value {
+    let series_summary: Vec<_> = study.series.values().map(|series| {
+        serde_json::json!({
+            "uid": series.series_instance_uid,
+            "number": series.series_number,
+            "description": series.series_description,
+            "modality": series.modality,
+            "instance_count": series.instances.len(),
+            "has_images": series.instances.iter().any(|i| i.has_pixel_data)
+        })
+    }).collect();
+
+    serde_json::json!({
+        "format": "medical",
+        "study": {
+            "uid": study.study_instance_uid,
+            "date": study.study_date,
+            "time": study.study_time,
+            "description": study.study_description
+        },
+        "patient": study.patient_info,
+        "series": series_summary,
+        "summary": {
+            "total_series": study.series.len(),
+            "total_instances": study.series.values().map(|s| s.instances.len()).sum::<usize>(),
+            "imaging_instances": study.series.values()
+                .flat_map(|s| &s.instances)
+                .filter(|i| i.has_pixel_data)
+                .count()
+        }
+    })
+}
+
+fn create_raw_study_output(study: &DicomStudy) -> serde_json::Value {
+    serde_json::json!({
+        "format": "raw",
+        "study_uid": study.study_instance_uid,
+        "files": study.series.values()
+            .flat_map(|s| &s.instances)
+            .map(|i| i.file_path.clone())
+            .collect::<Vec<_>>(),
+        "tag_count": study.series.values()
+            .flat_map(|s| &s.instances)
+            .map(|i| i.metadata.tags.len())
+            .sum::<usize>()
+    })
 }
 
 fn get_tag_value(tags: &HashMap<String, TagInfo>, tag: Tag) -> Option<String> {
