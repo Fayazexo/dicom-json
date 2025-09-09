@@ -1,7 +1,24 @@
 [package]
 name = "dicom-json"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["Fayaz <fayazexo@example.com>"]
+description = "Convert DICOM medical files to JSON format"
+repository = "https://github.com/fayazexo/dicom-json"
+license = "MIT OR Apache-2.0"
+keywords = ["dicom", "medical", "json", "cli"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+
+[[bin]]
+name = "dicom-json"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [dependencies]
 dicom = "0.6"

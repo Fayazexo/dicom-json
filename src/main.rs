@@ -886,7 +886,7 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 fn print_summary(results: &[DicomInstance]) {
-    println!("\n📊 Processing Summary:");
+    println!("\nProcessing Summary:");
     println!("   Total instances: {}", results.len());
     println!("   Files with pixel data: {}", results.iter().filter(|r| r.has_pixel_data).count());
     
