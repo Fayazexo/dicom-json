@@ -21,8 +21,8 @@ panic = "abort"
 strip = true
 
 [dependencies]
-dicom = "0.6"
-dicom-object = "0.6"
+dicom = { version = "0.6", default-features = false, features = ["inventory-registry"] }
+dicom-object = { version = "0.6", default-features = false }
 dicom-core = "0.6"
 dicom-dictionary-std = "0.6"
 clap = { version = "4.0", features = ["derive"] }
